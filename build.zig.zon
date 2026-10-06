@@ -1,0 +1,18 @@
+.{
+    .name = .pg_orm,
+    .version = "0.0.0",
+    .fingerprint = 0x6f1d9247b39d980d,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#aef360fef7feb7a65a2d4b6347f413e988845dd6",
+            .hash = "pg-0.0.0-Wp_7gUN_BgC96OS2Q1oxXDjSOkdaSFBP_mYrmOzIw0m3",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+}
