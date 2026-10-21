@@ -4,23 +4,27 @@ const sql = @import("sql.zig");
 const result = @import("result.zig");
 const query_mod = @import("query.zig");
 const BoundedArray = @import("BoundedArray.zig").BoundedArray;
+const meta = @import("meta.zig");
 
 /// Raw SQL query builder with typed results
 pub fn RawBuilder(comptime T: type) type {
+    const Meta = meta.ModelMeta(T);
+
     return struct {
         const Self = @This();
 
         allocator: std.mem.Allocator,
         sql_str: []const u8,
         params: BoundedArray(sql.Value, sql.MAX_PARAMS),
-        column_indicies: [][]const u8,
+        /// The field each result column fills, in order.
+        result_fields: []const []const u8,
 
         pub fn init(allocator: std.mem.Allocator, sql_string: []const u8, values: anytype) Self {
             var self = Self{
                 .allocator = allocator,
                 .sql_str = sql_string,
                 .params = BoundedArray(sql.Value, sql.MAX_PARAMS){},
-                .column_indicies = &[_][]const u8{},
+                .result_fields = Meta.all_field_names,
             };
 
             // Store params
@@ -31,18 +35,17 @@ pub fn RawBuilder(comptime T: type) type {
             return self;
         }
 
+        /// Nothing to free; kept so raw builders are used like the others.
         pub fn deinit(self: *Self) void {
-            if (self.column_indicies.len > 0) self.allocator.free(self.column_indicies);
+            _ = self;
         }
 
-        /// Provide column names so result mapping knows which columns map to which struct fields.
-        /// Pass field enum literals (`.{ .id, .name }`) — same shape as the typed builders.
+        /// Names the fields the result's columns fill, in order: field enum
+        /// literals (`.{ .id, .name }`), the same shape as the typed
+        /// builders. Without it, the columns fill every field in
+        /// declaration order.
         pub fn columns(self: *Self, comptime field_enums: anytype) *Self {
-            const meta = @import("meta.zig");
-            const Meta = meta.ModelMeta(T);
-            const indicies = self.allocator.alloc([]const u8, field_enums.len) catch return self;
-            Meta.columnsNames(field_enums, indicies);
-            self.column_indicies = indicies;
+            self.result_fields = comptime Meta.fieldNamesOf(field_enums);
             return self;
         }
 
@@ -57,17 +60,8 @@ pub fn RawBuilder(comptime T: type) type {
             const alloc = query_result.allocator();
             var items: std.array_list.Managed(T) = .init(alloc);
 
-            // If user didn't provide explicit columns, default to all model columns in order.
-            const indicies = if (self.column_indicies.len > 0) self.column_indicies else blk: {
-                const meta = @import("meta.zig");
-                const Meta = meta.ModelMeta(T);
-                const names = try alloc.alloc([]const u8, Meta.field_count);
-                inline for (Meta.fields, 0..) |f, i| names[i] = f.name;
-                break :blk names;
-            };
-
             while (try pg_result.next()) |row| {
-                const mapped = try result.mapRow(T, row, alloc, indicies);
+                const mapped = try result.mapRow(T, row, alloc, self.result_fields);
                 try items.append(mapped);
             }
 
@@ -85,16 +79,8 @@ pub fn RawBuilder(comptime T: type) type {
 
             const alloc = single_result.allocator();
 
-            const indicies = if (self.column_indicies.len > 0) self.column_indicies else blk: {
-                const meta = @import("meta.zig");
-                const Meta = meta.ModelMeta(T);
-                const names = try alloc.alloc([]const u8, Meta.field_count);
-                inline for (Meta.fields, 0..) |f, i| names[i] = f.name;
-                break :blk names;
-            };
-
             if (try pg_result.next()) |row| {
-                single_result.value = try result.mapRow(T, row, alloc, indicies);
+                single_result.value = try result.mapRow(T, row, alloc, self.result_fields);
 
                 if (try pg_result.next()) |_| {
                     return error.MultipleRowsFound;

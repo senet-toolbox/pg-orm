@@ -70,16 +70,18 @@ pub fn SingleResult(comptime T: type) type {
 }
 
 /// Maps a pg.Row to a struct T
-pub fn mapRow(comptime T: type, row: pg.Row, alloc: std.mem.Allocator, column_indicies: [][]const u8) !T {
+/// Decodes `row` into a `T`: column `i` fills the field named
+/// `field_names[i]`, so a model's renamed columns map by position.
+pub fn mapRow(comptime T: type, row: pg.Row, alloc: std.mem.Allocator, field_names: []const []const u8) !T {
     var result: T = undefined;
 
     // 1. Iterate over the fields of the struct at compile-time
     inline for (std.meta.fields(T)) |field| {
 
-        // 2. Find the index of the column that matches this field's name at runtime
+        // 2. Find the index of the column that fills this field at runtime
         var found_index: ?usize = null;
-        for (column_indicies, 0..) |col_name, i| {
-            if (std.mem.eql(u8, col_name, field.name)) {
+        for (field_names, 0..) |name, i| {
+            if (std.mem.eql(u8, name, field.name)) {
                 found_index = i;
                 break;
             }

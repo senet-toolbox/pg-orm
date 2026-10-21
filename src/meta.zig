@@ -100,11 +100,23 @@ pub fn ModelMeta(comptime T: type) type {
             };
         }
 
-        pub fn columnsNames(comptime field_enums: anytype, indicies: [][]const u8) void {
-            inline for (field_enums, 0..) |field_enum, i| {
-                indicies[i] = columnName(field_enum);
-            }
+        /// The names of the given fields, in order. Rows are decoded by
+        /// position: a result's first column fills the first of these.
+        pub fn fieldNamesOf(comptime field_enums: anytype) []const []const u8 {
+            return comptime blk: {
+                var names: [field_enums.len][]const u8 = undefined;
+                for (field_enums, 0..) |field_enum, i| {
+                    const field: std.meta.FieldEnum(T) = field_enum;
+                    names[i] = @tagName(field);
+                }
+                const final = names;
+                break :blk &final;
+            };
         }
+
+        /// Every field's name, in the order `allColumns` lists their
+        /// columns.
+        pub const all_field_names: []const []const u8 = &fieldNames();
 
         /// Get field names as an array
         pub fn fieldNames() [field_count][]const u8 {

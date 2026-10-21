@@ -15,10 +15,11 @@ pub fn InsertBuilder(comptime T: type) type {
         allocator: std.mem.Allocator,
         values_list: std.array_list.Managed(ValueSet),
         returning_columns: ?[]const u8,
+        /// The field each returned column fills, in order.
+        result_fields: []const []const u8,
         conflict_columns: ?[]const u8,
         conflict_action: ConflictAction,
         update_columns: ?[]const u8,
-        columns_indicies: [][]const u8,
 
         const ValueSet = struct {
             columns: []const u8,
@@ -36,10 +37,10 @@ pub fn InsertBuilder(comptime T: type) type {
                 .allocator = allocator,
                 .values_list = std.array_list.Managed(ValueSet).init(allocator),
                 .returning_columns = null,
+                .result_fields = Meta.all_field_names,
                 .conflict_columns = null,
                 .conflict_action = .none,
                 .update_columns = null,
-                .columns_indicies = &[_][]const u8{},
             };
         }
 
@@ -93,12 +94,14 @@ pub fn InsertBuilder(comptime T: type) type {
         /// Specify columns to return after insert
         pub fn returning(self: *Self, comptime columns: anytype) *Self {
             self.returning_columns = comptime Meta.columns(columns);
+            self.result_fields = comptime Meta.fieldNamesOf(columns);
             return self;
         }
 
         /// Return all columns
         pub fn returningAll(self: *Self) *Self {
             self.returning_columns = comptime Meta.allColumns();
+            self.result_fields = Meta.all_field_names;
             return self;
         }
 
@@ -249,7 +252,7 @@ pub fn InsertBuilder(comptime T: type) type {
                 var items = std.array_list.Managed(T).init(alloc);
 
                 while (try pg_result.next()) |row| {
-                    const mapped = try result.mapRow(T, row, alloc, self.columns_indicies);
+                    const mapped = try result.mapRow(T, row, alloc, self.result_fields);
                     try items.append(mapped);
                 }
 

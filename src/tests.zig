@@ -7,6 +7,7 @@ test {
     _ = @import("clause.zig");
     _ = @import("delete.zig");
     _ = @import("insert.zig");
+    _ = @import("live_test.zig");
     _ = @import("meta.zig");
     _ = @import("operators.zig");
     _ = @import("orm.zig");

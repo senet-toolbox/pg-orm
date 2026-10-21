@@ -1,0 +1,103 @@
+//! Against a real Postgres. Runs when `PG_DB` names a database the test may
+//! create a table in (`PG_HOST`, `PG_PORT`, `PG_USER` and `PG_PASSWORD` are
+//! read as `Connection.Config.fromEnv` reads them), and is skipped,
+//! saying so, otherwise:
+//!
+//!   PG_PORT=5432 PG_DB=pg_orm_test zig build test
+//!
+//! The table is created and dropped here.
+
+const std = @import("std");
+const testing = std.testing;
+const Connection = @import("Connection.zig");
+const pg_orm = @import("orm.zig");
+
+/// `power` is stored as `power_level`, so rows map by position, not by
+/// column name.
+const Hero = struct {
+    id: i32,
+    name: []const u8,
+    power: i32,
+
+    pub const orm = .{
+        .table = "pg_orm_live_heroes",
+        .columns = .{ .power = "power_level" },
+    };
+};
+
+fn lookup(env: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+    return env.get(key);
+}
+
+fn connect(env: *const std.process.Environ.Map) !Connection {
+    if (env.get("PG_DB") == null) {
+        std.debug.print("live tests skipped: set PG_DB (and PG_HOST, PG_PORT, PG_USER, PG_PASSWORD) to run them\n", .{});
+        return error.SkipZigTest;
+    }
+    return Connection.init(testing.io, testing.allocator, Connection.Config.fromEnv(env, lookup));
+}
+
+test "rows come back filled, renamed columns included" {
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    var conn = try connect(&env);
+    defer conn.deinit();
+    const pool = conn.pool();
+
+    _ = try pool.exec("DROP TABLE IF EXISTS pg_orm_live_heroes", .{});
+    _ = try pool.exec("CREATE TABLE pg_orm_live_heroes (id serial PRIMARY KEY, name text NOT NULL, power_level int NOT NULL)", .{});
+    defer _ = pool.exec("DROP TABLE pg_orm_live_heroes", .{}) catch {};
+
+    // INSERT ... RETURNING mapped none of the returned columns back.
+    {
+        var ib = pg_orm.insertWith(Hero, testing.allocator);
+        defer ib.deinit();
+        var inserted = try ib.values(.{ .name = "Goku", .power = 9001 }).returningAll().exec(pool);
+        defer inserted.deinit();
+        try testing.expectEqual(1, inserted.rows.items.len);
+        try testing.expectEqualStrings("Goku", inserted.rows.items[0].name);
+        try testing.expectEqual(9001, inserted.rows.items[0].power);
+    }
+    {
+        var ib = pg_orm.insertWith(Hero, testing.allocator);
+        defer ib.deinit();
+        var inserted = try ib.values(.{ .name = "Vegeta", .power = 8000 }).returning(.{ .power, .id }).exec(pool);
+        defer inserted.deinit();
+        try testing.expectEqual(8000, inserted.rows.items[0].power);
+        try testing.expectEqual(2, inserted.rows.items[0].id);
+    }
+
+    // A SELECT of every column, without `.select`, mapped nothing either.
+    {
+        var qb = pg_orm.queryWith(Hero, testing.allocator);
+        defer qb.deinit();
+        var heroes = try qb.where(.power, .gt, 8500).fetchAll(pool);
+        defer heroes.deinit();
+        try testing.expectEqual(1, heroes.items.len);
+        try testing.expectEqual(1, heroes.items[0].id);
+        try testing.expectEqualStrings("Goku", heroes.items[0].name);
+        try testing.expectEqual(9001, heroes.items[0].power);
+    }
+
+    // `.select` matched column names against field names, so `power`
+    // (column `power_level`) was never filled.
+    {
+        var qb = pg_orm.queryWith(Hero, testing.allocator);
+        defer qb.deinit();
+        var vegeta = try qb.select(.{ .power, .name }).where(.id, .eq, 2).fetchOne(pool);
+        defer vegeta.deinit();
+        const hero = try vegeta.unwrap();
+        try testing.expectEqual(8000, hero.power);
+        try testing.expectEqualStrings("Vegeta", hero.name);
+    }
+
+    {
+        var raw = pg_orm.rawWith(Hero, testing.allocator, "SELECT power_level, id FROM pg_orm_live_heroes WHERE name = $1", .{"Goku"});
+        defer raw.deinit();
+        var goku = try raw.columns(.{ .power, .id }).fetchOne(pool);
+        defer goku.deinit();
+        const hero = try goku.unwrap();
+        try testing.expectEqual(9001, hero.power);
+        try testing.expectEqual(1, hero.id);
+    }
+}

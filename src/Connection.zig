@@ -5,7 +5,7 @@
 //!
 //! Example:
 //! ```zig
-//! var conn = try Connection.init(allocator, .{
+//! var conn = try Connection.init(io, allocator, .{
 //!     .host = "127.0.0.1",
 //!     .port = 5432,
 //!     .username = "postgres",
@@ -63,9 +63,9 @@ pub const Config = struct {
     }
 };
 
-pub fn init(allocator: std.mem.Allocator, config: Config) !Connection {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
+/// `io` is kept by the pool, so it must outlive the connection: pass the
+/// `Io` your program runs on (`init.io` in `main`).
+pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !Connection {
     const new_pool = pg.Pool.init(io, allocator, .{
         .size = config.pool_size,
         .connect = .{

@@ -1,7 +1,7 @@
 //! orm_example — end-to-end demo of the typed ORM.
 //!
 //! Run with:
-//!   zig build orm-example
+//!   zig build example
 //!
 //! Reads connection settings from these env vars (defaults shown):
 //!   PG_HOST=127.0.0.1
@@ -44,30 +44,7 @@ const User = struct {
     };
 };
 
-// ---------------------------------------------------------------------------
-// Tiny env lookup that wraps std.process.getEnvVarOwned + a backing arena.
-// ---------------------------------------------------------------------------
-
-const Env = struct {
-    arena: std.heap.ArenaAllocator,
-
-    fn init(parent: std.mem.Allocator) Env {
-        return .{ .arena = std.heap.ArenaAllocator.init(parent) };
-    }
-
-    fn deinit(self: *Env) void {
-        self.arena.deinit();
-    }
-
-    fn get(self: *Env, key: []const u8) ?[]const u8 {
-        const a = self.arena.allocator();
-        const key_z = std.fmt.allocPrintSentinel(a, "{s}", .{key}, 0) catch return null;
-        const value_z = std.c.getenv(key_z.ptr) orelse return null;
-        return a.dupe(u8, std.mem.span(value_z)) catch null;
-    }
-};
-
-fn envLookup(env: *Env, key: []const u8) ?[]const u8 {
+fn envLookup(env: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
     return env.get(key);
 }
 
@@ -75,21 +52,16 @@ fn envLookup(env: *Env, key: []const u8) ?[]const u8 {
 // Main
 // ---------------------------------------------------------------------------
 
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var env = Env.init(allocator);
-    defer env.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // ---- 1. Show the comptime-generated DDL ---------------------------------
     const ddl = comptime schema.createTableSql(User);
     std.debug.print("== DDL (generated at comptime) ==\n{s};\n\n", .{ddl});
 
     // ---- 2. Connect ---------------------------------------------------------
-    const cfg = Connection.Config.fromEnv(&env, envLookup);
-    var conn = try Connection.init(allocator, cfg);
+    const cfg = Connection.Config.fromEnv(init.environ_map, envLookup);
+    var conn = try Connection.init(init.io, allocator, cfg);
     defer conn.deinit();
 
     orm.init(allocator);
@@ -100,7 +72,7 @@ pub fn main() !void {
     });
 
     // Optional: actually run the DDL when RUN_DDL is set.
-    if (env.get("RUN_DDL")) |_| {
+    if (init.environ_map.get("RUN_DDL")) |_| {
         _ = try orm.rawExec(conn.pool(), ddl, .{});
         std.debug.print("(applied CREATE TABLE)\n\n", .{});
     }

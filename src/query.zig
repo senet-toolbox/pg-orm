@@ -19,7 +19,8 @@ pub fn QueryBuilder(comptime T: type) type {
 
         allocator: std.mem.Allocator,
         select_columns: ?[]const u8,
-        columns_indicies: [][]const u8,
+        /// The field each result column fills, in order.
+        result_fields: []const []const u8,
         where_clause: clause.WhereClause,
         order_by_clause: clause.OrderByClause,
         limit_clause: clause.LimitClause,
@@ -31,14 +32,13 @@ pub fn QueryBuilder(comptime T: type) type {
                 .where_clause = clause.WhereClause.init(allocator),
                 .order_by_clause = clause.OrderByClause.init(allocator),
                 .limit_clause = .{},
-                .columns_indicies = &[_][]const u8{},
+                .result_fields = Meta.all_field_names,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.where_clause.deinit();
             self.order_by_clause.deinit();
-            self.allocator.free(self.columns_indicies);
         }
 
         // ====================================================================
@@ -48,9 +48,7 @@ pub fn QueryBuilder(comptime T: type) type {
         /// Select specific columns
         pub fn select(self: *Self, comptime columns: anytype) *Self {
             self.select_columns = comptime Meta.columns(columns);
-            const indicies = self.allocator.alloc([]const u8, columns.len) catch return self;
-            Meta.columnsNames(columns, indicies);
-            self.columns_indicies = indicies;
+            self.result_fields = comptime Meta.fieldNamesOf(columns);
             return self;
         }
 
@@ -180,7 +178,7 @@ pub fn QueryBuilder(comptime T: type) type {
             var query_result = result.QueryResult(T).init(self.allocator);
             errdefer query_result.deinit();
 
-            try executeWithParams(T, pool, builder, &query_result, self.columns_indicies);
+            try executeWithParams(T, pool, builder, &query_result, self.result_fields);
 
             return query_result;
         }
@@ -198,7 +196,7 @@ pub fn QueryBuilder(comptime T: type) type {
             var single_result = result.SingleResult(T).init(self.allocator);
             errdefer single_result.deinit();
 
-            try executeSingleWithParams(T, pool, builder, &single_result, self.columns_indicies);
+            try executeSingleWithParams(T, pool, builder, &single_result, self.result_fields);
 
             return single_result;
         }
@@ -239,12 +237,11 @@ fn executeWithParams(
     pool: *pg.Pool,
     builder: sql.SqlBuilder,
     query_result: *result.QueryResult(T),
-    columns_indicies: [][]const u8,
+    result_fields: []const []const u8,
 ) !void {
     const sql_str = builder.toSql();
     const params = builder.params.slice();
     const alloc = query_result.allocator();
-    std.debug.print("Params: {s} {any}\n", .{ sql_str, params });
 
     // Build tuple of params at runtime - we need to handle this dynamically
     var pg_result = try executeRawQuery(pool, sql_str, params);
@@ -253,7 +250,7 @@ fn executeWithParams(
     var items = std.array_list.Managed(T).init(alloc);
 
     while (try pg_result.next()) |row| {
-        const mapped = try result.mapRow(T, row, alloc, columns_indicies);
+        const mapped = try result.mapRow(T, row, alloc, result_fields);
         try items.append(mapped);
     }
 
@@ -265,7 +262,7 @@ fn executeSingleWithParams(
     pool: *pg.Pool,
     builder: sql.SqlBuilder,
     single_result: *result.SingleResult(T),
-    columns_indicies: [][]const u8,
+    result_fields: []const []const u8,
 ) !void {
     const sql_str = builder.toSql();
     const params = builder.params.slice();
@@ -275,7 +272,7 @@ fn executeSingleWithParams(
     defer pg_result.deinit();
 
     if (try pg_result.next()) |row| {
-        single_result.value = try result.mapRow(T, row, alloc, columns_indicies);
+        single_result.value = try result.mapRow(T, row, alloc, result_fields);
 
         if (try pg_result.next()) |_| {
             return error.MultipleRowsFound;
