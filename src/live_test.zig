@@ -101,3 +101,24 @@ test "rows come back filled, renamed columns included" {
         try testing.expectEqual(1, hero.id);
     }
 }
+
+// Builder queries kept their pooled connection, so a pool ran dry after as
+// many queries as it had connections.
+test "builder queries give their connection back to the pool" {
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    if (env.get("PG_DB") == null) return error.SkipZigTest;
+    var config = Connection.Config.fromEnv(&env, lookup);
+    config.pool_size = 2;
+    var conn = try Connection.init(testing.io, testing.allocator, config);
+    defer conn.deinit();
+    const pool = conn.pool();
+
+    for (0..5) |i| {
+        var raw = pg_orm.rawWith(Hero, testing.allocator, "SELECT $1::int AS power_level, 1 AS id", .{@as(i32, @intCast(i))});
+        defer raw.deinit();
+        var hero = try raw.columns(.{ .power, .id }).fetchOne(pool);
+        defer hero.deinit();
+        try testing.expectEqual(@as(i32, @intCast(i)), (try hero.unwrap()).power);
+    }
+}

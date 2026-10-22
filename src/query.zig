@@ -363,7 +363,9 @@ pub fn executeRawQuery(pool: *pg.Pool, sql_str: []const u8, params: []const sql.
     const conn = try pool.acquire();
     errdefer pool.release(conn);
 
-    var stmt = conn.prepare(sql_str) catch |err| {
+    // The result gives the connection back to the pool when it is deinit;
+    // until it exists, the errdefer above does.
+    var stmt = conn.prepareOpts(sql_str, .{ .release_conn = true }) catch |err| {
         if (PgError.fromConn(conn, pool._allocator)) |pg_err| {
             std.debug.print("Postgres Error: {s}\n", .{pg_err.message});
         }
