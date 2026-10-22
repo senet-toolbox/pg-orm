@@ -7,8 +7,11 @@
 //!    for quick prototyping.
 //!
 //! 2. Explicit `.schema` decl on `pub const orm`: per-column overrides for
-//!    type, length, primary_key, unique, not_null, default. Anything not
-//!    listed falls back to the inferred type.
+//!    type, length, primary_key, unique, not_null, default, references and
+//!    on_delete. Anything not listed falls back to the inferred type.
+//!
+//! Indexes go in `orm.indexes`, one `.{ .name, .columns, .descending }` per
+//! index, and `createIndexesSql` builds them.
 //!
 //! Example:
 //! ```zig
@@ -104,6 +107,28 @@ pub const ColumnSpec = struct {
     unique: bool = false,
     not_null: bool = false,
     default: ?DefaultValue = null,
+    /// `"table(column)"`: a foreign key.
+    references: ?[]const u8 = null,
+    on_delete: ?ReferentialAction = null,
+};
+
+/// What a foreign key does when the row it references is deleted.
+pub const ReferentialAction = enum {
+    cascade,
+    set_null,
+    set_default,
+    restrict,
+    no_action,
+
+    pub fn sql(self: ReferentialAction) []const u8 {
+        return switch (self) {
+            .cascade => "CASCADE",
+            .set_null => "SET NULL",
+            .set_default => "SET DEFAULT",
+            .restrict => "RESTRICT",
+            .no_action => "NO ACTION",
+        };
+    }
 };
 
 /// Typed default expressions for DDL generation.
@@ -192,6 +217,32 @@ pub fn createTableSql(comptime T: type) []const u8 {
     }
 }
 
+/// Build one `CREATE INDEX IF NOT EXISTS ...` string per entry of
+/// `orm.indexes`. Each entry is `.{ .name = "...", .columns = .{ .field, ... } }`,
+/// with an optional `.descending = true` (every column) and `.unique = true`.
+pub fn createIndexesSql(comptime T: type) []const []const u8 {
+    comptime {
+        if (!@hasDecl(T, "orm") or !@hasField(@TypeOf(T.orm), "indexes")) return &.{};
+        const Meta = meta.ModelMeta(T);
+        const indexes = T.orm.indexes;
+        var out: [indexes.len][]const u8 = undefined;
+        for (indexes, 0..) |index, i| {
+            const unique = @hasField(@TypeOf(index), "unique") and index.unique;
+            const descending = @hasField(@TypeOf(index), "descending") and index.descending;
+            var columns: []const u8 = "";
+            for (index.columns, 0..) |field, c| {
+                if (c > 0) columns = columns ++ ", ";
+                columns = columns ++ Meta.columnName(@field(std.meta.FieldEnum(T), @tagName(field)));
+                if (descending) columns = columns ++ " DESC";
+            }
+            out[i] = (if (unique) "CREATE UNIQUE INDEX IF NOT EXISTS " else "CREATE INDEX IF NOT EXISTS ") ++
+                index.name ++ " ON " ++ Meta.tableName() ++ " (" ++ columns ++ ")";
+        }
+        const final = out;
+        return &final;
+    }
+}
+
 /// Build a `DROP TABLE IF EXISTS ...` string.
 pub fn dropTableSql(comptime T: type) []const u8 {
     comptime {
@@ -230,6 +281,8 @@ fn columnSpec(comptime T: type, comptime field_name: []const u8) ?ColumnSpec {
     if (@hasField(@TypeOf(raw), "unique")) spec.unique = raw.unique;
     if (@hasField(@TypeOf(raw), "not_null")) spec.not_null = raw.not_null;
     if (@hasField(@TypeOf(raw), "default")) spec.default = coerceDefaultValue(@TypeOf(raw.default), raw.default);
+    if (@hasField(@TypeOf(raw), "references")) spec.references = raw.references;
+    if (@hasField(@TypeOf(raw), "on_delete")) spec.on_delete = raw.on_delete;
     return spec;
 }
 
@@ -293,6 +346,13 @@ fn columnDefinitionSql(comptime T: type, comptime field: std.builtin.Type.Struct
         if (spec.unique) s = s ++ " UNIQUE";
 
         if (spec.default) |def| s = s ++ " DEFAULT " ++ def.sql();
+
+        if (spec.references) |target| {
+            s = s ++ " REFERENCES " ++ target;
+            if (spec.on_delete) |action| s = s ++ " ON DELETE " ++ action.sql();
+        } else if (spec.on_delete != null) {
+            @compileError(field.name ++ ": on_delete needs references");
+        }
 
         return s;
     }
@@ -380,6 +440,49 @@ test "createTableSql with typed defaults and uuid helpers" {
         "CREATE TABLE IF NOT EXISTS events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), is_active BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now())",
         ddl,
     );
+}
+
+test "createTableSql with a foreign key, and createIndexesSql" {
+    const Report = struct {
+        id: [16]u8,
+        group_id: [16]u8,
+        seen_at: i64,
+        message: []const u8,
+
+        pub const orm = .{
+            .table = "reports",
+            .primary_key = .id,
+            .columns = .{ .seen_at = "timestamp" },
+            .schema = .{
+                .group_id = .{ .not_null = true, .references = "groups(id)", .on_delete = .cascade },
+                .seen_at = .{ .type = .timestamptz, .not_null = true },
+            },
+            .indexes = .{
+                .{ .name = "idx_reports_group_id", .columns = .{.group_id} },
+                .{ .name = "idx_reports_seen_at", .columns = .{.seen_at}, .descending = true },
+                .{ .name = "idx_reports_group_message", .columns = .{ .group_id, .message }, .unique = true },
+            },
+        };
+    };
+
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS reports (id UUID PRIMARY KEY, group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE, timestamp TIMESTAMPTZ NOT NULL, message TEXT)",
+        comptime createTableSql(Report),
+    );
+    const indexes = comptime createIndexesSql(Report);
+    try std.testing.expectEqual(3, indexes.len);
+    try std.testing.expectEqualStrings("CREATE INDEX IF NOT EXISTS idx_reports_group_id ON reports (group_id)", indexes[0]);
+    // The field's column name, not the field's.
+    try std.testing.expectEqualStrings("CREATE INDEX IF NOT EXISTS idx_reports_seen_at ON reports (timestamp DESC)", indexes[1]);
+    try std.testing.expectEqualStrings("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_group_message ON reports (group_id, message)", indexes[2]);
+}
+
+test "createIndexesSql without indexes" {
+    const User = struct {
+        id: i32,
+        pub const orm = .{ .table = "users" };
+    };
+    try std.testing.expectEqual(0, (comptime createIndexesSql(User)).len);
 }
 
 test "dropTableSql" {

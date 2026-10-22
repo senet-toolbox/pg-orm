@@ -122,3 +122,56 @@ test "builder queries give their connection back to the pool" {
         try testing.expectEqual(@as(i32, @intCast(i)), (try hero.unwrap()).power);
     }
 }
+
+const Parent = struct {
+    id: [16]u8,
+    pub const orm = .{
+        .table = "pg_orm_live_parents",
+        .primary_key = .id,
+        .schema = .{ .id = .{ .default = pg_orm.schema.defaults.gen_random_uuid } },
+    };
+};
+
+const Child = struct {
+    id: i32,
+    parent_id: [16]u8,
+    seen_at: i64,
+    pub const orm = .{
+        .table = "pg_orm_live_children",
+        .primary_key = .id,
+        .schema = .{
+            .id = .{ .type = .serial },
+            .parent_id = .{ .not_null = true, .references = "pg_orm_live_parents(id)", .on_delete = .cascade },
+            .seen_at = .{ .type = .timestamptz, .not_null = true },
+        },
+        .indexes = .{.{ .name = "idx_pg_orm_live_children_seen_at", .columns = .{.seen_at}, .descending = true }},
+    };
+};
+
+test "the DDL's foreign keys cascade, and its indexes exist" {
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    var conn = try connect(&env);
+    defer conn.deinit();
+    const pool = conn.pool();
+
+    _ = try pool.exec("DROP TABLE IF EXISTS pg_orm_live_children, pg_orm_live_parents", .{});
+    _ = try pool.exec(comptime pg_orm.schema.createTableSql(Parent), .{});
+    _ = try pool.exec(comptime pg_orm.schema.createTableSql(Child), .{});
+    defer _ = pool.exec("DROP TABLE pg_orm_live_children, pg_orm_live_parents", .{}) catch {};
+    inline for (comptime pg_orm.schema.createIndexesSql(Child)) |ddl| _ = try pool.exec(ddl, .{});
+
+    _ = try pool.exec("INSERT INTO pg_orm_live_parents DEFAULT VALUES", .{});
+    _ = try pool.exec("INSERT INTO pg_orm_live_children (parent_id, seen_at) SELECT id, now() FROM pg_orm_live_parents", .{});
+    _ = try pool.exec("DELETE FROM pg_orm_live_parents", .{});
+    var left = (try pool.row("SELECT count(*) FROM pg_orm_live_children", .{})).?;
+    defer left.deinit() catch {};
+    try testing.expectEqual(0, try left.get(i64, 0));
+
+    var index = (try pool.row("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_pg_orm_live_children_seen_at'", .{})).?;
+    defer index.deinit() catch {};
+    try testing.expectEqualStrings(
+        "CREATE INDEX idx_pg_orm_live_children_seen_at ON public.pg_orm_live_children USING btree (seen_at DESC)",
+        try index.get([]const u8, 0),
+    );
+}
