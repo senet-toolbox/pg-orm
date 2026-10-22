@@ -202,6 +202,7 @@ pub fn isOptional(comptime FieldType: type) bool {
 /// Build a `CREATE TABLE IF NOT EXISTS ...` string at comptime.
 pub fn createTableSql(comptime T: type) []const u8 {
     comptime {
+        @setEvalBranchQuota(branchQuota(T));
         const Meta = meta.ModelMeta(T);
         const table = Meta.tableName();
 
@@ -223,6 +224,7 @@ pub fn createTableSql(comptime T: type) []const u8 {
 pub fn createIndexesSql(comptime T: type) []const []const u8 {
     comptime {
         if (!@hasDecl(T, "orm") or !@hasField(@TypeOf(T.orm), "indexes")) return &.{};
+        @setEvalBranchQuota(branchQuota(T));
         const Meta = meta.ModelMeta(T);
         const indexes = T.orm.indexes;
         var out: [indexes.len][]const u8 = undefined;
@@ -262,6 +264,13 @@ pub fn truncateSql(comptime T: type) []const u8 {
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Each column looks its field up among all the fields, so the work grows
+/// with the square of their number; the default quota runs out near 20.
+fn branchQuota(comptime T: type) u32 {
+    const n = @typeInfo(T).@"struct".fields.len;
+    return 1000 + 200 * n * n;
+}
 
 /// Look up the explicit ColumnSpec for a field, if any.
 fn columnSpec(comptime T: type, comptime field_name: []const u8) ?ColumnSpec {
@@ -499,4 +508,59 @@ test "truncateSql" {
         pub const orm = .{ .table = "users" };
     };
     try std.testing.expectEqualStrings("TRUNCATE TABLE users", comptime truncateSql(User));
+}
+
+test "createTableSql of a wide model" {
+    const Wide = struct {
+        id: i32,
+        a01: ?[]const u8 = null,
+        a02: ?[]const u8 = null,
+        a03: ?[]const u8 = null,
+        a04: ?[]const u8 = null,
+        a05: ?[]const u8 = null,
+        a06: ?[]const u8 = null,
+        a07: ?[]const u8 = null,
+        a08: ?[]const u8 = null,
+        a09: ?[]const u8 = null,
+        a10: ?[]const u8 = null,
+        a11: ?[]const u8 = null,
+        a12: ?[]const u8 = null,
+        a13: ?[]const u8 = null,
+        a14: ?[]const u8 = null,
+        a15: ?[]const u8 = null,
+        a16: ?[]const u8 = null,
+        a17: ?[]const u8 = null,
+        a18: ?[]const u8 = null,
+        a19: ?[]const u8 = null,
+        a20: ?[]const u8 = null,
+        a21: ?[]const u8 = null,
+        a22: ?[]const u8 = null,
+        a23: ?[]const u8 = null,
+        a24: ?[]const u8 = null,
+        a25: ?[]const u8 = null,
+        a26: ?[]const u8 = null,
+        a27: ?[]const u8 = null,
+        a28: ?[]const u8 = null,
+        a29: ?[]const u8 = null,
+        a30: ?[]const u8 = null,
+        a31: ?[]const u8 = null,
+        a32: ?[]const u8 = null,
+        a33: ?[]const u8 = null,
+        a34: ?[]const u8 = null,
+        a35: ?[]const u8 = null,
+        a36: ?[]const u8 = null,
+        a37: ?[]const u8 = null,
+        a38: ?[]const u8 = null,
+        a39: ?[]const u8 = null,
+        a40: ?[]const u8 = null,
+
+        pub const orm = .{
+            .table = "wide",
+            .primary_key = .id,
+            .indexes = .{.{ .name = "idx_wide_a40", .columns = .{.a40} }},
+        };
+    };
+    const ddl = comptime createTableSql(Wide);
+    try std.testing.expect(std.mem.endsWith(u8, ddl, "a39 TEXT, a40 TEXT)"));
+    try std.testing.expectEqualStrings("CREATE INDEX IF NOT EXISTS idx_wide_a40 ON wide (a40)", (comptime createIndexesSql(Wide))[0]);
 }
